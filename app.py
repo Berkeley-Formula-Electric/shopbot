@@ -304,10 +304,11 @@ def help_(ack: Ack, respond: Respond, say: Say, command: dict):
     send_public = args[0]
 
     cmds_str = '\n'.join([f'{n}: {d}' for n, d in commands])
-    text = '*shopbot Help*\n\n' \
-           'All commands:\n' \
+    text = '*shopbot*\n\n' \
+           'A slack bot that manages purchasing / shopping carts.\n\n' \
+           '*All commands:*\n' \
            f'{cmds_str}\n\n' \
-           'Quickstart:\n' \
+           '*Quickstart:*\n' \
            '1. Create a cart.\n' \
            '2. Add items to the cart.\n' \
            '3. Buy the cart. Approvers will react to the message to approve the purchase.\n' \
