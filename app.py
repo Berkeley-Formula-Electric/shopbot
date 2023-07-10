@@ -112,8 +112,14 @@ def list_carts(ack: Ack, respond: Respond, say: Say, command: dict):
     user = db.User(command['user_name'], command['user_id'])
 
     tables = db.database.tables()
-    tables.remove('approvals')
-    tables.remove('approvers')
+    try:
+        tables.remove('approvals')
+    except KeyError:
+        pass
+    try:
+        tables.remove('approvers')
+    except KeyError:
+        pass
 
     tables_str = ''.join([f'- {t}\n' for t in tables])
     if len(tables_str) == 0:
