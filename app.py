@@ -12,7 +12,6 @@ dotenv.load_dotenv()
 
 CHANNEL_NAME = os.environ['CHANNEL_NAME']
 CHANNEL_ID = os.environ['CHANNEL_ID']
-APPROVAL_THRESHOLD = 2
 
 _approve_reaction_matchers = [
     lambda event: event['reaction'] == 'white_check_mark',
@@ -200,7 +199,7 @@ def add_approve_reaction(ack: Ack, say: Say, event: dict, client: WebClient):
     say(channel=CHANNEL_NAME, text=text)
 
     approvals, _ = db.get_approvals(cart)
-    if len(approvals) == APPROVAL_THRESHOLD:
+    if len(approvals) == len(db.get_approvers()):
         cart_content = _cart_content_fmtstr(cart, approver.name)
         approvals_repr = ' '.join([db.User.from_dict(approval['user']).mention() for approval in approvals])
         text = '*PURCHASE REQUEST APPROVED*\n\n' \
