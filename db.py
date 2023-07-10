@@ -1,7 +1,7 @@
 import tinydb
 
 
-database = tinydb.TinyDB('db.json')
+database = tinydb.TinyDB('db.json', indent=4)
 
 
 class User:
@@ -97,7 +97,7 @@ def add_approver(approver: User, user: User) -> bool:
 
 def rm_approver(approver: User) -> bool:
     approvers = database.table('approvers')
-    matches = approvers.search(tinydb.Query().approver == approver)
+    matches = approvers.search(tinydb.Query().approver == approver.to_dict())
     if len(matches) != 1:
         return False
     approvers.remove(doc_ids=[matches[0].doc_id])
@@ -129,11 +129,11 @@ def get_approvals(cart_name: str):
     matches = approval_table.search(tinydb.Query().cart == cart_name)
     if len(matches) != 1:
         return None
-    return matches[0]['approvals']
+    return matches[0]['approvals'], matches[0].doc_id
 
 
 def add_approval(cart_name: str, user: User, ts: str) -> bool:
-    cart_approvals = get_approvals(cart_name)
+    cart_approvals, doc_id = get_approvals(cart_name)
     # OK for approvals to be empty, but not None
     if cart_approvals is None:
         return False
@@ -142,11 +142,20 @@ def add_approval(cart_name: str, user: User, ts: str) -> bool:
         'ts': ts
     }
     cart_approvals.append(approval)
+    approval_table = database.table('approvals')
+    approval_table.update(doc_ids=[doc_id], fields={'approvals': cart_approvals})
     return True
 
 
 def rm_approval(cart_name: str, user: User) -> bool:
-    pass
+    approvals, doc_id = get_approvals(cart_name)
+    for approval in approvals[:]:
+        if approval['user'] == user.to_dict():
+            approvals.remove(approval)
+            approval_table = database.table('approvals')
+            approval_table.update(doc_ids=[doc_id], fields={'approvals': approvals})
+            return True
+    return False
 
 
 def clear_approvals(cart_name: str, user: User) -> bool:

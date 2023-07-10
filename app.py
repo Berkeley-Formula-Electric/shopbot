@@ -8,12 +8,11 @@ from slack_sdk import WebClient
 
 import db
 
-
 dotenv.load_dotenv()
 
 CHANNEL_NAME = os.environ['CHANNEL_NAME']
 CHANNEL_ID = os.environ['CHANNEL_ID']
-APPROVAL_THRESHOLD = 1
+APPROVAL_THRESHOLD = 2
 
 _approve_reaction_matchers = [
     lambda event: event['reaction'] == 'white_check_mark',
@@ -23,8 +22,15 @@ _approve_reaction_matchers = [
 
 app = App(token=os.environ['SLACK_BOT_TOKEN'])
 
+commands = []
 
-@app.command('/sb-add')
+
+def register_command(name, description):
+    commands.append((name, description))
+    return app.command(name)
+
+
+@register_command('/sb-add', 'Add part link/num to a cart')
 def add(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
@@ -48,7 +54,7 @@ def add(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text)
 
 
-@app.command('/sb-rm')
+@register_command('/sb-rm', 'Remove a part from a cart')
 def rm(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
@@ -70,7 +76,7 @@ def rm(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text)
 
 
-@app.command('/sb-list')
+@register_command('/sb-list', 'List parts in a cart')
 def list_(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
@@ -91,7 +97,33 @@ def list_(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text) if send_public else respond(text=text)
 
 
-@app.command('/sb-create')
+@register_command('/sb-list-carts', 'List all current carts')
+def list_carts(ack: Ack, respond: Respond, say: Say, command: dict):
+    ack()
+
+    if _incorrect_channel(command, respond):
+        return
+    args = _parse_args(command)
+    if len(args) not in (0, 1):
+        _incorrect_num_args(respond, '0 or 1', len(args))
+        return
+    if len(args) == 0:
+        args.append(False)
+    send_public = args[0]
+    user = db.User(command['user_name'], command['user_id'])
+
+    tables = db.database.tables()
+    tables.remove('approvals')
+    tables.remove('approvers')
+
+    tables_str = ''.join([f'- {t}\n' for t in tables])
+    if len(tables_str) == 0:
+        tables_str += '(no carts)'
+    text = f'{user.mention()} requested a list of all carts:\n{tables_str}'
+    say(channel=CHANNEL_NAME, text=text) if send_public else respond(text=text)
+
+
+@register_command('/sb-create', 'Create a cart')
 def create(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
@@ -107,7 +139,7 @@ def create(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text)
 
 
-@app.command('/sb-clear')
+@register_command('/sb-clear', 'Clear a cart (without buying)')
 def clear(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
@@ -121,7 +153,7 @@ def clear(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text)
 
 
-@app.command('/sb-buy')
+@register_command('/sb-buy', 'Buy cart (+clear if approved)')
 def buy(ack: Ack, respond: Respond, say: Say, command: dict, client: WebClient):
     ack()
 
@@ -152,54 +184,34 @@ def buy(ack: Ack, respond: Respond, say: Say, command: dict, client: WebClient):
 def add_approve_reaction(ack: Ack, say: Say, event: dict, client: WebClient):
     ack()
 
-    reaction = client.reactions_get(channel=CHANNEL_ID, timestamp=event['item']['ts'])
-    if not reaction or not reaction.data['ok']:
-        _client_post_ephemeral(client, event,
-                               'Failed getting message which reaction was applied to.')
+    cart = _get_reaction_cart(client, event)
+    if not cart:
         return
-    message = reaction.data['message']
-    cart_matches = re.findall(r'> requested cart (.+):', message['text'])
-    if len(cart_matches) != 1:
-        # This should be silent; unrelated message
-        return
-    cart = cart_matches[0]
-    if cart not in db.database.tables():
-        _client_post_ephemeral(client, event,
-                               f'Approval failed. Cart {cart} does not exist.')
+    approver = _get_reaction_approver(client, event)
+    if not approver:
         return
 
-    user = None
-    all_approvers = db.get_approvers()
-    for approver in all_approvers:
-        if approver.uid == event['user']:
-            user = approver
-            break
-    if not user:
-        _client_post_ephemeral(client, event,
-                               f'Approval failed. User {user.name} is not in the approvers list.')
-        return
-
-    success = db.add_approval(cart, user, event['event_ts'])
+    success = db.add_approval(cart, approver, event['event_ts'])
     if not success:
         _client_post_ephemeral(client, event,
                                f'Approval failed. Approval for cart {cart} has not been started.')
         return
-    text = f'{user.mention()} approved cart {cart}'
+    text = f'{approver.mention()} approved cart {cart}'
     say(channel=CHANNEL_NAME, text=text)
 
-    approvals = db.get_approvals(cart)
+    approvals, _ = db.get_approvals(cart)
     if len(approvals) == APPROVAL_THRESHOLD:
-        cart_content = _cart_content_fmtstr(cart, user.name)
+        cart_content = _cart_content_fmtstr(cart, approver.name)
         approvals_repr = ' '.join([db.User.from_dict(approval['user']).mention() for approval in approvals])
         text = '*PURCHASE REQUEST APPROVED*\n\n' \
                f'{cart_content}\n\n' \
                f'Approved by: {approvals_repr}\n' \
                f'Cart {cart} will be cleared.'
-        if not db.clear_cart(cart, user):
+        if not db.clear_cart(cart, approver):
             _client_post_ephemeral(client, event,
                                    f'Cart {cart} could not be cleared after approval. Exiting.')
             return
-        if not db.clear_approvals(cart, user):
+        if not db.clear_approvals(cart, approver):
             _client_post_ephemeral(client, event,
                                    f'Approvals list for cart {cart} could not be cleared after approval. Exiting.')
             return
@@ -213,9 +225,24 @@ def ignore_reaction_add(body, logger):
 
 
 @app.event(event='reaction_removed', matchers=_approve_reaction_matchers)
-def rm_approve_reaction(ack: Ack, say: Say, respond: Respond, event: dict, client: WebClient):
+def rm_approve_reaction(ack: Ack, say: Say, event: dict, client: WebClient):
     ack()
-    # TODO finish
+
+    cart = _get_reaction_cart(client, event)
+    if not cart:
+        return
+    approver = _get_reaction_approver(client, event)
+    if not approver:
+        return
+
+    success = db.rm_approval(cart, approver)
+    if not success:
+        _client_post_ephemeral(client, event,
+                               f'Approval removal failed. Approval for cart {cart} has not been started or '
+                               'approval from approval user was not found.')
+        return
+    text = f'{approver.mention()} removed their approval from cart {cart}'
+    say(channel=CHANNEL_NAME, text=text)
 
 
 @app.event('reaction_removed')
@@ -224,17 +251,16 @@ def ignore_reaction_rm(body, logger):
     pass
 
 
-@app.command('/sb-add-approver')
+@register_command('/sb-add-approver', 'Make a user an approver')
 def add_approver(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
     approver_str, user = _single_arg(command, respond)
     approver = db.User.from_str(approver_str)
 
-    #TODO uncomment after testing
-    # if approver == user:
-    #     respond(text='Approver cannot be yourself. Ask someone else to add you.')
-    #     return
+    if approver == user:
+        respond(text='Approver cannot be yourself. Ask someone else to add you.')
+        return
 
     success = db.add_approver(approver, user)
     if not success:
@@ -244,7 +270,7 @@ def add_approver(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text)
 
 
-@app.command('/sb-rm-approver')
+@register_command('/sb-rm-approver', 'Remove an approver user')
 def rm_approver(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
 
@@ -263,14 +289,69 @@ def rm_approver(ack: Ack, respond: Respond, say: Say, command: dict):
     say(channel=CHANNEL_NAME, text=text)
 
 
-@app.command('/sb-help')
+@register_command('/sb-help', 'Help with using shopbot')
 def help_(ack: Ack, respond: Respond, say: Say, command: dict):
     ack()
-    # TODO finish
+
+    if _incorrect_channel(command, respond):
+        return
+    args = _parse_args(command)
+    if len(args) not in (0, 1):
+        _incorrect_num_args(respond, '0 or 1', len(args))
+        return
+    if len(args) == 0:
+        args.append(False)
+    send_public = args[0]
+
+    cmds_str = '\n'.join([f'{n}: {d}' for n, d in commands])
+    text = '*shopbot Help*\n\n' \
+           'All commands:\n' \
+           f'{cmds_str}\n\n' \
+           'Quickstart:\n' \
+           '1. Create a cart.\n' \
+           '2. Add items to the cart.\n' \
+           '3. Buy the cart. Approvers will react to the message to approve the purchase.\n' \
+           '4. Once approved, the cart is cleared. Repeat from the beginning for another cart.\n' \
+           '(note: approvers must be added before they can approve any purchases)\n'
+    say(channel=CHANNEL_NAME, text=text) if send_public else respond(text=text)
+
+
+def _get_reaction_approver(client, event):
+    user = None
+    all_approvers = db.get_approvers()
+    for approver in all_approvers:
+        if approver.uid == event['user']:
+            user = approver
+            break
+    if not user:
+        _client_post_ephemeral(client, event,
+                               f'Approval failed. User {user.name} is not in the approvers list.')
+        return
+    return user
+
+
+def _get_reaction_cart(client, event):
+    reaction = client.reactions_get(channel=CHANNEL_ID, timestamp=event['item']['ts'])
+    if not reaction or not reaction.data['ok']:
+        _client_post_ephemeral(client, event,
+                               'Failed getting message which reaction was applied to.')
+        return
+    message = reaction.data['message']
+    cart_matches = re.findall(r'> requested cart (.+):', message['text'])
+    if len(cart_matches) != 1:
+        # This should be silent; unrelated message
+        return
+    cart = cart_matches[0]
+    if cart not in db.database.tables():
+        _client_post_ephemeral(client, event,
+                               f'Approval failed. Cart {cart} does not exist.')
+        return
+    return cart
 
 
 def _client_post_ephemeral(client, event, text):
     client.chat_postEphemeral(channel=CHANNEL_ID, user=event['user'], text=text)
+
 
 def _single_arg(command, respond):
     if _incorrect_channel(command, respond):
